@@ -1,0 +1,59 @@
+name: Source Review (Spike)
+on:
+  repository_dispatch:
+    types: [source-review]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Dump payload
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          echo "=== Received client_payload ==="
+          echo "$PAYLOAD" | jq .
+          echo "==============================="
+
+      - name: Validate payload shape
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          set -e
+          echo "$PAYLOAD" | jq -e '.scanId and .productId and .commitSha and .callbackUrl'
+          echo "Payload validation: OK"
+
+      - name: Compute HMAC and POST callback
+        if: always()
+        env:
+          CALLBACK_URL: ${{ github.event.client_payload.callbackUrl }}
+          CALLBACK_SECRET: ${{ secrets.FOXVAULT_CALLBACK_SECRET }}
+          SCAN_ID: ${{ github.event.client_payload.scanId }}
+          PRODUCT_ID: ${{ github.event.client_payload.productId }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -e
+
+          # Minimal fake result body — spike only
+          BODY=$(jq -n \
+            --arg scanId "$SCAN_ID" \
+            --arg productId "$PRODUCT_ID" \
+            --arg status "completed" \
+            --arg runId "$RUN_ID" \
+            '{scanId: $scanId, productId: $productId, status: $status, githubActionsRunId: ($runId | tonumber), findings: [], summary: {critical:0,high:0,medium:0,low:0,info:0}}')
+
+          echo "Body to sign: $BODY"
+
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$CALLBACK_SECRET" -hex | sed 's/^.* //')
+          echo "Signature: sha256=$SIG"
+
+          echo "POSTing to $CALLBACK_URL"
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-FoxVault-Signature: sha256=$SIG" \
+            --data "$BODY" \
+            -w "\nHTTP: %{http_code}\n"
